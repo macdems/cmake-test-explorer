@@ -34,6 +34,9 @@ import {
 /** Special ID value for the root suite */
 const ROOT_SUITE_ID = '*';
 
+/** Suffix for suites */
+const SUITE_SUFFIX = '*';
+
 /**
  * CMake test adapter for the Test Explorer UI extension
  */
@@ -152,25 +155,59 @@ export class CmakeAdapter implements TestAdapter {
         extraCtestLoadArgs
       );
 
-      const suite: TestSuiteInfo = {
+      const rootSuite: TestSuiteInfo = {
         type: 'suite',
         id: ROOT_SUITE_ID,
         label: 'CMake', // the label of the root node should be the name of the testing framework
         children: [],
       };
 
-      for (let test of this.cmakeTests) {
-        const testInfo: TestInfo = {
-          type: 'test',
-          id: test.name,
-          label: test.name,
-        };
-        suite.children.push(testInfo);
+      const delimiter = config.get<string>("suiteDelimiter");
+      if (!delimiter) {
+        for (let test of this.cmakeTests) {
+          const testInfo: TestInfo = {
+            type: 'test',
+            id: test.name,
+            label: test.name,
+            tooltip: test.name
+          };
+          rootSuite.children.push(testInfo);
+        }
+      } else {
+        for (let test of this.cmakeTests) {
+          const path = test.name.split(delimiter);
+          const testName = path.pop() || "undefined";
+          let suite = rootSuite;
+          let currentId = "";
+          for (let name of path) {
+            currentId += name + delimiter;
+            let suit = suite.children.find((item) => item.type == 'suite' && item.id === currentId + SUITE_SUFFIX);
+            if (!suit) {
+              suit = {
+                type: 'suite',
+                id: currentId + SUITE_SUFFIX,
+                label: name,
+                children: [],
+                tooltip: currentId.substr(0, currentId.length-delimiter.length)
+              };
+              suite.children.push(suit);
+            }
+            suite = suit as TestSuiteInfo;
+          }
+          const testInfo: TestInfo = {
+            type: 'test',
+            id: test.name,
+            label: testName,
+            description: test.name,
+            tooltip: test.name
+          };
+          suite.children.push(testInfo);
+        }
       }
 
       this.testsEmitter.fire(<TestLoadFinishedEvent>{
         type: 'finished',
-        suite,
+        suite: rootSuite,
       });
     } catch (e) {
       if (e instanceof CacheNotFoundError && buildDir === '') {
@@ -260,7 +297,9 @@ export class CmakeAdapter implements TestAdapter {
       this.workspaceFolder.uri
     );
 
-    if (id === ROOT_SUITE_ID) {
+    const delimiter = config.get<string>("suiteDelimiter");
+
+    if (id === ROOT_SUITE_ID || delimiter && (id.endsWith(delimiter + SUITE_SUFFIX))) {
       // Run the whole test suite
 
       let parallelJobs = config.get<number>("parallelJobs");
@@ -285,8 +324,16 @@ export class CmakeAdapter implements TestAdapter {
         state: 'running',
       });
 
+      var suiteTests: CmakeTestInfo[];
+      if (id === ROOT_SUITE_ID) {
+        suiteTests = this.cmakeTests;
+      } else {
+        const prefix = id.substr(0, id.length - SUITE_SUFFIX.length);
+        suiteTests = this.cmakeTests.filter((test) => test.name.startsWith(prefix));
+      }
+
       const tests = [];
-      for (const test of this.cmakeTests) {
+      for (const test of suiteTests) {
         const run = this.runTest(test.name);
         tests.push(run);
         const cleanup = () => this.runningTests.splice(this.runningTests.indexOf(running), 1);
@@ -390,6 +437,11 @@ export class CmakeAdapter implements TestAdapter {
         'cmakeExplorer',
         this.workspaceFolder.uri
       );
+      const delimiter = config.get<string>("suiteDelimiter");
+      if (delimiter && (id.endsWith(delimiter + SUITE_SUFFIX))) {
+        // Can't debug test suite.
+        return;
+      }
       const varMap = await this.getVariableSubstitutionMap();
       const debugConfig = await this.configGetStr(
         config,
